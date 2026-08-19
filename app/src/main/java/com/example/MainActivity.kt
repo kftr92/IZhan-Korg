@@ -1,10 +1,14 @@
 package com.example
 
+import android.Manifest
 import android.app.Activity
+import android.content.pm.PackageManager
 import android.media.midi.MidiDeviceInfo
+import android.os.Build
 import android.os.Bundle
 import android.widget.Toast
 import android.view.WindowManager
+import androidx.core.content.ContextCompat
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
@@ -45,6 +49,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.window.DialogProperties
 import kotlinx.coroutines.launch
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
@@ -57,6 +62,9 @@ import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Bluetooth
+import androidx.compose.material.icons.filled.BluetoothConnected
+import androidx.compose.material.icons.filled.BluetoothSearching
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
@@ -67,6 +75,7 @@ import androidx.compose.material.icons.filled.Fullscreen
 import androidx.compose.material.icons.filled.FullscreenExit
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Save
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -598,9 +607,12 @@ fun MidiControllerApp(viewModel: MainViewModel) {
     val activeInputTriggerPadIndex by viewModel.activeInputTriggerPadIndex.collectAsStateWithLifecycle()
     val lastMidiInputInfo by viewModel.lastMidiInputInfo.collectAsStateWithLifecycle()
     val midiLearningPadIndex by viewModel.midiLearningPadIndex.collectAsStateWithLifecycle()
+    val scannedBleDevices by viewModel.scannedBleDevices.collectAsStateWithLifecycle()
+    val isScanningBle by viewModel.isScanningBle.collectAsStateWithLifecycle()
 
     var editPresetIndex by remember { mutableStateOf<Int?>(null) }
     var showSaveDialog by remember { mutableStateOf(false) }
+    var showBleMidiDialog by remember { mutableStateOf(false) }
     var newConfigName by remember { mutableStateOf("") }
     var showConfigMenu by remember { mutableStateOf(false) }
     var isEditMode by remember { mutableStateOf(false) }
@@ -608,6 +620,46 @@ fun MidiControllerApp(viewModel: MainViewModel) {
 
     val context = LocalContext.current
     val activity = context as? Activity
+
+    val blePermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        val granted = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            permissions[Manifest.permission.BLUETOOTH_SCAN] == true &&
+            permissions[Manifest.permission.BLUETOOTH_CONNECT] == true
+        } else {
+            permissions[Manifest.permission.ACCESS_FINE_LOCATION] == true ||
+            permissions[Manifest.permission.ACCESS_COARSE_LOCATION] == true
+        }
+        if (granted) {
+            viewModel.startBleScan()
+        }
+    }
+
+    fun requestBleScanWithPermission() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val hasScan = ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED
+            val hasConnect = ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED
+            if (hasScan && hasConnect) {
+                viewModel.startBleScan()
+            } else {
+                blePermissionLauncher.launch(arrayOf(
+                    Manifest.permission.BLUETOOTH_SCAN,
+                    Manifest.permission.BLUETOOTH_CONNECT
+                ))
+            }
+        } else {
+            val hasLocation = ContextCompat.checkSelfPermission(context, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+            if (hasLocation) {
+                viewModel.startBleScan()
+            } else {
+                blePermissionLauncher.launch(arrayOf(
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION
+                ))
+            }
+        }
+    }
 
     fun toggleFullscreen() {
         activity?.window?.let { window ->
@@ -1172,6 +1224,26 @@ fun MidiControllerApp(viewModel: MainViewModel) {
         )
     }
 
+    // BLE MIDI Connection Dialog
+    if (showBleMidiDialog) {
+        BleMidiDialog(
+            scannedDevices = scannedBleDevices,
+            isScanning = isScanningBle,
+            onStartScan = { requestBleScanWithPermission() },
+            onStopScan = { viewModel.stopBleScan() },
+            onConnectDevice = { device, asInput, asOutput ->
+                viewModel.connectBleDevice(device, asInput, asOutput)
+            },
+            onDisconnectDevice = { device ->
+                viewModel.disconnectBleDevice(device)
+            },
+            onDismiss = {
+                viewModel.stopBleScan()
+                showBleMidiDialog = false
+            }
+        )
+    }
+
     val topPadding = if (isFullscreen) 4.dp else 24.dp
 
     Column(
@@ -1183,20 +1255,15 @@ fun MidiControllerApp(viewModel: MainViewModel) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(bottom = 6.dp),
+                .padding(bottom = 4.dp),
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            // Title & Configuration Selector
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(
-                    text = "KORG MIDI",
-                    color = Color.White,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.ExtraBold,
-                    modifier = Modifier.padding(end = 4.dp)
-                )
-
+            // Configuration Selector & Sound Slot Add
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
                 // Config Dropdown Button (Hamburger Menu)
                 Box {
                     SmallGlossyButton(
@@ -1262,8 +1329,6 @@ fun MidiControllerApp(viewModel: MainViewModel) {
                     }
                 }
 
-                Spacer(Modifier.width(4.dp))
-
                 // Save Config Button
                 SmallGlossyButton(
                     text = "Save",
@@ -1278,8 +1343,6 @@ fun MidiControllerApp(viewModel: MainViewModel) {
                     icon = { Icon(Icons.Default.Save, contentDescription = "Save", tint = Color.White, modifier = Modifier.size(12.dp)) }
                 )
 
-                Spacer(Modifier.width(4.dp))
-
                 // Add Sound Slot Button
                 SmallGlossyButton(
                     text = "+ Slot",
@@ -1292,8 +1355,11 @@ fun MidiControllerApp(viewModel: MainViewModel) {
                 )
             }
 
-            // Transpose & Device Control
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            // Transpose, MIDI & Fullscreen Control
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(4.dp)
+            ) {
                 // Edit Toggle Button
                 SmallGlossyButton(
                     text = "Edit",
@@ -1312,9 +1378,6 @@ fun MidiControllerApp(viewModel: MainViewModel) {
                     }
                 )
 
-                Spacer(Modifier.width(6.dp))
-
-                Text("TRANSPOSE", color = Color(0xFFB0BEC5), fontSize = 11.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(end = 4.dp))
                 val noteNames = arrayOf("C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B")
                 val currentNote = noteNames[(transpose % 12 + 12) % 12]
                 val transposeLabel = if (transpose == 0) "$currentNote (0)" else if (transpose > 0) "$currentNote (+$transpose)" else "$currentNote ($transpose)"
@@ -1323,31 +1386,54 @@ fun MidiControllerApp(viewModel: MainViewModel) {
                     text = "-",
                     isSelected = false,
                     onClick = { viewModel.setTranspose(transpose - 1) },
-                    modifier = Modifier.width(74.dp).height(38.dp),
-                    fontSize = 22.sp,
-                    horizontalPadding = 12.dp,
-                    verticalPadding = 4.dp
+                    modifier = Modifier.width(56.dp).height(36.dp),
+                    fontSize = 20.sp,
+                    horizontalPadding = 6.dp,
+                    verticalPadding = 2.dp
                 )
                 SmallGlossyButton(
                     text = transposeLabel,
                     isSelected = true,
                     onClick = { viewModel.setTranspose(0) },
-                    modifier = Modifier.width(86.dp).height(38.dp),
-                    fontSize = 13.sp,
-                    horizontalPadding = 6.dp,
-                    verticalPadding = 4.dp
+                    modifier = Modifier.width(68.dp).height(36.dp),
+                    fontSize = 11.5.sp,
+                    horizontalPadding = 4.dp,
+                    verticalPadding = 2.dp
                 )
                 SmallGlossyButton(
                     text = "+",
                     isSelected = false,
                     onClick = { viewModel.setTranspose(transpose + 1) },
-                    modifier = Modifier.width(74.dp).height(38.dp),
-                    fontSize = 22.sp,
-                    horizontalPadding = 12.dp,
-                    verticalPadding = 4.dp
+                    modifier = Modifier.width(56.dp).height(36.dp),
+                    fontSize = 20.sp,
+                    horizontalPadding = 6.dp,
+                    verticalPadding = 2.dp
                 )
 
-                Spacer(Modifier.width(6.dp))
+                // BLE MIDI Quick Action Button
+                val hasBleConnected = (selectedInputDevice?.type == MidiDeviceInfo.TYPE_BLUETOOTH) ||
+                        (selectedOutputDevice?.type == MidiDeviceInfo.TYPE_BLUETOOTH) ||
+                        scannedBleDevices.any { it.isConnected }
+
+                SmallGlossyButton(
+                    text = "BLE",
+                    isSelected = hasBleConnected,
+                    onClick = {
+                        showBleMidiDialog = true
+                        requestBleScanWithPermission()
+                    },
+                    fontSize = 10.sp,
+                    horizontalPadding = 5.dp,
+                    verticalPadding = 3.dp,
+                    icon = {
+                        Icon(
+                            imageVector = if (hasBleConnected) Icons.Default.BluetoothConnected else if (isScanningBle) Icons.Default.BluetoothSearching else Icons.Default.Bluetooth,
+                            contentDescription = "BLE MIDI",
+                            tint = if (hasBleConnected) Color(0xFF00E676) else if (isScanningBle) Color(0xFF00E5FF) else Color.White,
+                            modifier = Modifier.size(13.dp)
+                        )
+                    }
+                )
 
                 // Dual MIDI IN / MIDI OUT Device selection
                 var expandedInput by remember { mutableStateOf(false) }
@@ -1357,7 +1443,7 @@ fun MidiControllerApp(viewModel: MainViewModel) {
                 ExposedDropdownMenuBox(
                     expanded = expandedInput,
                     onExpandedChange = { expandedInput = !expandedInput },
-                    modifier = Modifier.width(135.dp)
+                    modifier = Modifier.width(112.dp)
                 ) {
                     val inputName = selectedInputDevice?.properties?.getString(MidiDeviceInfo.PROPERTY_NAME)
                         ?: selectedInputDevice?.properties?.getString(MidiDeviceInfo.PROPERTY_PRODUCT)
@@ -1367,12 +1453,12 @@ fun MidiControllerApp(viewModel: MainViewModel) {
                         onValueChange = {},
                         readOnly = true,
                         singleLine = true,
-                        textStyle = TextStyle(fontSize = 10.sp, color = inputStatusColor, fontWeight = FontWeight.Bold),
+                        textStyle = TextStyle(fontSize = 9.5.sp, color = inputStatusColor, fontWeight = FontWeight.Bold),
                         leadingIcon = {
                             Box(
                                 modifier = Modifier
                                     .padding(start = 4.dp)
-                                    .size(6.dp)
+                                    .size(5.dp)
                                     .clip(CircleShape)
                                     .background(inputStatusColor)
                             )
@@ -1380,7 +1466,7 @@ fun MidiControllerApp(viewModel: MainViewModel) {
                         trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expandedInput) },
                         modifier = Modifier
                             .menuAnchor()
-                            .height(38.dp),
+                            .height(36.dp),
                         colors = ExposedDropdownMenuDefaults.outlinedTextFieldColors(
                             focusedBorderColor = inputStatusColor,
                             unfocusedBorderColor = inputStatusColor,
@@ -1397,6 +1483,21 @@ fun MidiControllerApp(viewModel: MainViewModel) {
                             .background(Color(0xFF08142A))
                             .border(1.dp, inputStatusColor)
                     ) {
+                        DropdownMenuItem(
+                            text = {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(Icons.Default.BluetoothSearching, contentDescription = null, tint = Color(0xFF00E5FF), modifier = Modifier.size(14.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("Scan / Connect BLE...", color = Color(0xFF00E5FF), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                }
+                            },
+                            onClick = {
+                                expandedInput = false
+                                showBleMidiDialog = true
+                                requestBleScanWithPermission()
+                            }
+                        )
+                        HorizontalDivider(color = Color(0xFF13264A))
                         if (devices.isEmpty()) {
                             DropdownMenuItem(
                                 text = { Text("No MIDI devices connected", color = Color.Gray, fontSize = 11.sp) },
@@ -1411,18 +1512,26 @@ fun MidiControllerApp(viewModel: MainViewModel) {
                                 }
                             )
                             devices.forEach { device ->
+                                val isBle = (device.type == MidiDeviceInfo.TYPE_BLUETOOTH)
                                 val name = device.properties.getString(MidiDeviceInfo.PROPERTY_NAME)
                                     ?: device.properties.getString(MidiDeviceInfo.PROPERTY_PRODUCT)
                                     ?: "Device ${device.id}"
+                                val displayName = if (isBle) "⚡ [BLE] $name" else name
                                 val isThisSelected = device.id == selectedInputDevice?.id
                                 DropdownMenuItem(
                                     text = {
-                                        Text(
-                                            name,
-                                            color = if (isThisSelected) Color(0xFF00E676) else Color.White,
-                                            fontSize = 11.sp,
-                                            fontWeight = if (isThisSelected) FontWeight.Bold else FontWeight.Normal
-                                        )
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            if (isBle) {
+                                                Icon(Icons.Default.Bluetooth, contentDescription = null, tint = if (isThisSelected) Color(0xFF00E676) else Color(0xFF00E5FF), modifier = Modifier.size(13.dp))
+                                                Spacer(Modifier.width(4.dp))
+                                            }
+                                            Text(
+                                                displayName,
+                                                color = if (isThisSelected) Color(0xFF00E676) else if (isBle) Color(0xFF80D8FF) else Color.White,
+                                                fontSize = 11.sp,
+                                                fontWeight = if (isThisSelected) FontWeight.Bold else FontWeight.Normal
+                                            )
+                                        }
                                     },
                                     onClick = {
                                         viewModel.midiController.selectInputDevice(device)
@@ -1434,8 +1543,6 @@ fun MidiControllerApp(viewModel: MainViewModel) {
                     }
                 }
 
-                Spacer(Modifier.width(6.dp))
-
                 var expandedOutput by remember { mutableStateOf(false) }
                 val isOutputConnected = selectedOutputDevice != null
                 val outputStatusColor = if (isOutputConnected) Color(0xFF00E676) else Color(0xFFFF1744)
@@ -1443,7 +1550,7 @@ fun MidiControllerApp(viewModel: MainViewModel) {
                 ExposedDropdownMenuBox(
                     expanded = expandedOutput,
                     onExpandedChange = { expandedOutput = !expandedOutput },
-                    modifier = Modifier.width(135.dp)
+                    modifier = Modifier.width(112.dp)
                 ) {
                     val outputName = selectedOutputDevice?.properties?.getString(MidiDeviceInfo.PROPERTY_NAME)
                         ?: selectedOutputDevice?.properties?.getString(MidiDeviceInfo.PROPERTY_PRODUCT)
@@ -1453,12 +1560,12 @@ fun MidiControllerApp(viewModel: MainViewModel) {
                         onValueChange = {},
                         readOnly = true,
                         singleLine = true,
-                        textStyle = TextStyle(fontSize = 10.sp, color = outputStatusColor, fontWeight = FontWeight.Bold),
+                        textStyle = TextStyle(fontSize = 9.5.sp, color = outputStatusColor, fontWeight = FontWeight.Bold),
                         leadingIcon = {
                             Box(
                                 modifier = Modifier
                                     .padding(start = 4.dp)
-                                    .size(6.dp)
+                                    .size(5.dp)
                                     .clip(CircleShape)
                                     .background(outputStatusColor)
                             )
@@ -1466,7 +1573,7 @@ fun MidiControllerApp(viewModel: MainViewModel) {
                         trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expandedOutput) },
                         modifier = Modifier
                             .menuAnchor()
-                            .height(38.dp),
+                            .height(36.dp),
                         colors = ExposedDropdownMenuDefaults.outlinedTextFieldColors(
                             focusedBorderColor = outputStatusColor,
                             unfocusedBorderColor = outputStatusColor,
@@ -1483,6 +1590,21 @@ fun MidiControllerApp(viewModel: MainViewModel) {
                             .background(Color(0xFF08142A))
                             .border(1.dp, outputStatusColor)
                     ) {
+                        DropdownMenuItem(
+                            text = {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(Icons.Default.BluetoothSearching, contentDescription = null, tint = Color(0xFF00E5FF), modifier = Modifier.size(14.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("Scan / Connect BLE...", color = Color(0xFF00E5FF), fontSize = 11.sp, fontWeight = FontWeight.Bold)
+                                }
+                            },
+                            onClick = {
+                                expandedOutput = false
+                                showBleMidiDialog = true
+                                requestBleScanWithPermission()
+                            }
+                        )
+                        HorizontalDivider(color = Color(0xFF13264A))
                         if (devices.isEmpty()) {
                             DropdownMenuItem(
                                 text = { Text("No MIDI devices connected", color = Color.Gray, fontSize = 11.sp) },
@@ -1497,18 +1619,26 @@ fun MidiControllerApp(viewModel: MainViewModel) {
                                 }
                             )
                             devices.forEach { device ->
+                                val isBle = (device.type == MidiDeviceInfo.TYPE_BLUETOOTH)
                                 val name = device.properties.getString(MidiDeviceInfo.PROPERTY_NAME)
                                     ?: device.properties.getString(MidiDeviceInfo.PROPERTY_PRODUCT)
                                     ?: "Device ${device.id}"
+                                val displayName = if (isBle) "⚡ [BLE] $name" else name
                                 val isThisSelected = device.id == selectedOutputDevice?.id
                                 DropdownMenuItem(
                                     text = {
-                                        Text(
-                                            name,
-                                            color = if (isThisSelected) Color(0xFF00E676) else Color.White,
-                                            fontSize = 11.sp,
-                                            fontWeight = if (isThisSelected) FontWeight.Bold else FontWeight.Normal
-                                        )
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            if (isBle) {
+                                                Icon(Icons.Default.Bluetooth, contentDescription = null, tint = if (isThisSelected) Color(0xFF00E676) else Color(0xFF00E5FF), modifier = Modifier.size(13.dp))
+                                                Spacer(Modifier.width(4.dp))
+                                            }
+                                            Text(
+                                                displayName,
+                                                color = if (isThisSelected) Color(0xFF00E676) else if (isBle) Color(0xFF80D8FF) else Color.White,
+                                                fontSize = 11.sp,
+                                                fontWeight = if (isThisSelected) FontWeight.Bold else FontWeight.Normal
+                                            )
+                                        }
                                     },
                                     onClick = {
                                         viewModel.midiController.selectOutputDevice(device)
@@ -1520,21 +1650,20 @@ fun MidiControllerApp(viewModel: MainViewModel) {
                     }
                 }
 
-                Spacer(Modifier.width(6.dp))
-
                 // Fullscreen Toggle Button (far right next to MIDI selector)
                 SmallGlossyButton(
                     text = "",
                     isSelected = isFullscreen,
                     onClick = { toggleFullscreen() },
-                    horizontalPadding = 5.dp,
-                    verticalPadding = 3.dp,
+                    modifier = Modifier.size(36.dp),
+                    horizontalPadding = 0.dp,
+                    verticalPadding = 0.dp,
                     icon = {
                         Icon(
                             imageVector = if (isFullscreen) Icons.Default.FullscreenExit else Icons.Default.Fullscreen,
-                            contentDescription = "Toggle Fullscreen",
+                            contentDescription = if (isFullscreen) "Exit Fullscreen" else "Enter Fullscreen",
                             tint = if (isFullscreen) Color(0xFFFF6D00) else Color.White,
-                            modifier = Modifier.size(15.dp)
+                            modifier = Modifier.size(19.dp)
                         )
                     }
                 )
@@ -2170,6 +2299,11 @@ fun MidiTrafficConsoleDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+        modifier = Modifier
+            .fillMaxWidth(0.92f)
+            .widthIn(max = 860.dp)
+            .padding(vertical = 12.dp),
         title = {
             Row(
                 modifier = Modifier.fillMaxWidth(),
@@ -2398,5 +2532,269 @@ fun MidiTrafficConsoleDialog(
         },
         confirmButton = {},
         dismissButton = {}
+    )
+}
+
+@Composable
+fun BleMidiDialog(
+    scannedDevices: List<BleMidiDevice>,
+    isScanning: Boolean,
+    onStartScan: () -> Unit,
+    onStopScan: () -> Unit,
+    onConnectDevice: (android.bluetooth.BluetoothDevice, asInput: Boolean, asOutput: Boolean) -> Unit,
+    onDisconnectDevice: (android.bluetooth.BluetoothDevice) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val infiniteTransition = rememberInfiniteTransition(label = "ble_pulse")
+    val pulseAlpha by infiniteTransition.animateFloat(
+        initialValue = 0.4f,
+        targetValue = 1.0f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(800, easing = LinearEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "pulse"
+    )
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+        modifier = Modifier
+            .fillMaxWidth(0.92f)
+            .widthIn(max = 840.dp)
+            .padding(vertical = 8.dp),
+        title = {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    modifier = Modifier.weight(1f, fill = false)
+                ) {
+                    Icon(
+                        imageVector = if (isScanning) Icons.Default.BluetoothSearching else Icons.Default.Bluetooth,
+                        contentDescription = null,
+                        tint = if (isScanning) Color(0xFF00E5FF).copy(alpha = pulseAlpha) else Color(0xFF00E5FF),
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Column {
+                        Text("Bluetooth LE MIDI Setup", color = Color.White, fontSize = 15.sp, fontWeight = FontWeight.Bold)
+                        Text(
+                            if (isScanning) "Scanning for MIDI controllers & synths..." else "Connect BLE MIDI Input & Output",
+                            color = Color(0xFFB0BEC5),
+                            fontSize = 10.5.sp
+                        )
+                    }
+                }
+
+                Spacer(Modifier.width(12.dp))
+
+                SmallGlossyButton(
+                    text = if (isScanning) "Stop Scan" else "Scan BLE",
+                    isSelected = isScanning,
+                    onClick = {
+                        if (isScanning) onStopScan() else onStartScan()
+                    },
+                    fontSize = 11.sp,
+                    horizontalPadding = 12.dp,
+                    verticalPadding = 6.dp,
+                    icon = {
+                        Icon(
+                            imageVector = if (isScanning) Icons.Default.Close else Icons.Default.Refresh,
+                            contentDescription = null,
+                            tint = Color.White,
+                            modifier = Modifier.size(13.dp)
+                        )
+                    }
+                )
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 380.dp)
+                    .verticalScroll(rememberScrollState())
+            ) {
+                Text(
+                    "Connect your Bluetooth MIDI keyboard, foot controller, or sound module (e.g. CME WIDI, Korg microKEY Air, Roland, Yamaha MD-BT01, etc.):",
+                    color = Color(0xFF90CAF9),
+                    fontSize = 11.sp,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
+
+                if (scannedDevices.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 12.dp)
+                            .background(Color(0xFF071224), RoundedCornerShape(8.dp))
+                            .border(1.dp, Color(0xFF193256), RoundedCornerShape(8.dp))
+                            .padding(20.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Icon(
+                                Icons.Default.BluetoothSearching,
+                                contentDescription = null,
+                                tint = Color(0xFF4FC3F7),
+                                modifier = Modifier.size(36.dp)
+                            )
+                            Spacer(Modifier.height(4.dp))
+                            Text(
+                                if (isScanning) "Scanning for nearby Bluetooth MIDI devices..." else "No BLE MIDI devices detected.",
+                                color = Color.White,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                textAlign = TextAlign.Center
+                            )
+                            Text(
+                                if (isScanning) "Please ensure your BLE controller or synth is in pairing mode." else "Tap 'Scan BLE' above to start searching for controllers, keyboards, or pedals.",
+                                color = Color(0xFF90A4AE),
+                                fontSize = 11.sp,
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                    }
+                } else {
+                    scannedDevices.forEach { bleDevice ->
+                        val isConnected = bleDevice.isConnected
+                        val borderColor = if (isConnected) Color(0xFF00E676) else Color(0xFF1D3B6A)
+                        val bgColor = if (isConnected) Color(0xFF062B1D) else Color(0xFF08152B)
+
+                        Card(
+                            colors = CardDefaults.cardColors(containerColor = bgColor),
+                            shape = RoundedCornerShape(8.dp),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 4.dp)
+                                .border(1.dp, borderColor, RoundedCornerShape(8.dp))
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    modifier = Modifier.weight(1f)
+                                ) {
+                                    Icon(
+                                        imageVector = if (isConnected) Icons.Default.BluetoothConnected else Icons.Default.Bluetooth,
+                                        contentDescription = null,
+                                        tint = if (isConnected) Color(0xFF00E676) else Color(0xFF00E5FF),
+                                        modifier = Modifier.size(24.dp)
+                                    )
+                                    Spacer(Modifier.width(10.dp))
+                                    Column {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Text(
+                                                bleDevice.name,
+                                                color = Color.White,
+                                                fontSize = 13.sp,
+                                                fontWeight = FontWeight.Bold
+                                            )
+                                            if (bleDevice.isBonded) {
+                                                Spacer(Modifier.width(6.dp))
+                                                Text(
+                                                    "[Paired]",
+                                                    color = Color(0xFFFFB74D),
+                                                    fontSize = 9.sp,
+                                                    fontWeight = FontWeight.SemiBold
+                                                )
+                                            }
+                                            if (isConnected) {
+                                                Spacer(Modifier.width(6.dp))
+                                                Text(
+                                                    "[CONNECTED]",
+                                                    color = Color(0xFF00E676),
+                                                    fontSize = 9.sp,
+                                                    fontWeight = FontWeight.Bold
+                                                )
+                                            }
+                                        }
+                                        Spacer(Modifier.height(2.dp))
+                                        Text(
+                                            "${bleDevice.address}   |   RSSI: ${bleDevice.rssi} dBm",
+                                            color = Color(0xFF90A4AE),
+                                            fontSize = 10.sp
+                                        )
+                                    }
+                                }
+
+                                Spacer(Modifier.width(10.dp))
+
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                                ) {
+                                    if (isConnected) {
+                                        OutlinedButton(
+                                            onClick = { onDisconnectDevice(bleDevice.device) },
+                                            colors = ButtonDefaults.outlinedButtonColors(
+                                                contentColor = Color(0xFFFF5252)
+                                            ),
+                                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFFF5252)),
+                                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp),
+                                            modifier = Modifier.height(32.dp)
+                                        ) {
+                                            Text("Disconnect", fontSize = 10.5.sp, fontWeight = FontWeight.Bold)
+                                        }
+                                    } else {
+                                        Button(
+                                            onClick = { onConnectDevice(bleDevice.device, true, true) },
+                                            colors = ButtonDefaults.buttonColors(
+                                                containerColor = Color(0xFF00B0FF)
+                                            ),
+                                            contentPadding = PaddingValues(horizontal = 10.dp, vertical = 4.dp),
+                                            modifier = Modifier.height(32.dp)
+                                        ) {
+                                            Text("Connect IN+OUT", fontSize = 10.sp, fontWeight = FontWeight.Bold, color = Color.Black)
+                                        }
+                                        OutlinedButton(
+                                            onClick = { onConnectDevice(bleDevice.device, true, false) },
+                                            colors = ButtonDefaults.outlinedButtonColors(
+                                                contentColor = Color(0xFF00E5FF)
+                                            ),
+                                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF00E5FF)),
+                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                            modifier = Modifier.height(32.dp)
+                                        ) {
+                                            Text("IN", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                        }
+                                        OutlinedButton(
+                                            onClick = { onConnectDevice(bleDevice.device, false, true) },
+                                            colors = ButtonDefaults.outlinedButtonColors(
+                                                contentColor = Color(0xFFFF6D00)
+                                            ),
+                                            border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFFF6D00)),
+                                            contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
+                                            modifier = Modifier.height(32.dp)
+                                        ) {
+                                            Text("OUT", fontSize = 10.sp, fontWeight = FontWeight.Bold)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Close", color = Color(0xFF00E5FF), fontWeight = FontWeight.Bold)
+            }
+        },
+        containerColor = Color(0xFF061022),
+        tonalElevation = 8.dp
     )
 }

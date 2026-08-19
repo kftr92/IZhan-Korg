@@ -1,6 +1,13 @@
 package com.example
 
 import android.app.Service
+import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothManager
+import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.ScanFilter
+import android.bluetooth.le.ScanResult
+import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.content.Intent
 import android.media.midi.MidiDevice
@@ -13,6 +20,7 @@ import android.os.Binder
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.ParcelUuid
 import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -21,6 +29,7 @@ import java.io.ByteArrayOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import java.util.UUID
 
 enum class KorgConnectionStatus {
     DISCONNECTED,
@@ -42,6 +51,10 @@ data class MidiTrafficLog(
 
 class KorgMidiService : Service() {
 
+    companion object {
+        val BLE_MIDI_SERVICE_UUID: UUID = UUID.fromString("03B80E5A-EDE8-4B33-A028-510996E02885")
+    }
+
     private val binder = KorgMidiBinder()
 
     inner class KorgMidiBinder : Binder() {
@@ -49,6 +62,8 @@ class KorgMidiService : Service() {
     }
 
     private lateinit var midiManager: MidiManager
+    private var bluetoothManager: BluetoothManager? = null
+    private var bluetoothAdapter: BluetoothAdapter? = null
 
     private val _connectionStatus = MutableStateFlow(KorgConnectionStatus.DISCONNECTED)
     val connectionStatus: StateFlow<KorgConnectionStatus> = _connectionStatus.asStateFlow()
@@ -77,6 +92,14 @@ class KorgMidiService : Service() {
     private val _incomingMidiEvent = MutableStateFlow<IncomingMidiInputEvent?>(null)
     val incomingMidiEvent: StateFlow<IncomingMidiInputEvent?> = _incomingMidiEvent.asStateFlow()
 
+    private val _scannedBleDevices = MutableStateFlow<List<BleMidiDevice>>(emptyList())
+    val scannedBleDevices: StateFlow<List<BleMidiDevice>> = _scannedBleDevices.asStateFlow()
+
+    private val _isScanningBle = MutableStateFlow(false)
+    val isScanningBle: StateFlow<Boolean> = _isScanningBle.asStateFlow()
+
+    private val _openedBleMidiDevices = mutableMapOf<String, MidiDevice>()
+
     private var activeInputMidiDevice: MidiDevice? = null
     private var activeOutputMidiDevice: MidiDevice? = null
     private var inputPort: MidiInputPort? = null
@@ -90,6 +113,43 @@ class KorgMidiService : Service() {
     private var inSysex = false
 
     private val timeFormatter = SimpleDateFormat("HH:mm:ss.SSS", Locale.US)
+
+    private val bleScanCallback = object : ScanCallback() {
+        override fun onScanResult(callbackType: Int, result: ScanResult?) {
+            val device = result?.device ?: return
+            val name = try {
+                device.name ?: result.scanRecord?.deviceName ?: "BLE MIDI (${device.address.takeLast(5)})"
+            } catch (e: SecurityException) {
+                "BLE MIDI (${device.address.takeLast(5)})"
+            }
+            val isBonded = try { device.bondState == BluetoothDevice.BOND_BONDED } catch (e: SecurityException) { false }
+            val isConnected = _openedBleMidiDevices.containsKey(device.address)
+
+            val item = BleMidiDevice(
+                device = device,
+                name = name,
+                address = device.address,
+                rssi = result.rssi,
+                isBonded = isBonded,
+                isConnected = isConnected
+            )
+
+            val currentList = _scannedBleDevices.value.toMutableList()
+            val index = currentList.indexOfFirst { it.address == device.address }
+            if (index >= 0) {
+                currentList[index] = item
+            } else {
+                currentList.add(item)
+            }
+            _scannedBleDevices.value = currentList
+        }
+
+        override fun onScanFailed(errorCode: Int) {
+            Log.e("KorgMidiService", "BLE Scan Failed: $errorCode")
+            _isScanningBle.value = false
+            logTraffic(MidiTrafficLog.Direction.SYSTEM, "BLE Scan Failed: Error code $errorCode", "")
+        }
+    }
 
     private val deviceCallback = object : MidiManager.DeviceCallback() {
         override fun onDeviceAdded(device: MidiDeviceInfo) {
@@ -178,7 +238,153 @@ class KorgMidiService : Service() {
         val product = properties.getString(MidiDeviceInfo.PROPERTY_PRODUCT)
         val name = properties.getString(MidiDeviceInfo.PROPERTY_NAME)
         val manufacturer = properties.getString(MidiDeviceInfo.PROPERTY_MANUFACTURER)
-        return product ?: name ?: manufacturer ?: "MIDI Device #${device.id}"
+        val baseName = product ?: name ?: manufacturer ?: "MIDI Device #${device.id}"
+        return if (device.type == MidiDeviceInfo.TYPE_BLUETOOTH) {
+            "⚡ BLE: $baseName"
+        } else {
+            baseName
+        }
+    }
+
+    fun startBleScan() {
+        if (_isScanningBle.value) return
+
+        if (bluetoothAdapter == null) {
+            bluetoothManager = getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager
+            bluetoothAdapter = bluetoothManager?.adapter
+        }
+
+        val adapter = bluetoothAdapter
+        if (adapter == null || !adapter.isEnabled) {
+            _statusMessage.value = "Bluetooth is disabled"
+            logTraffic(MidiTrafficLog.Direction.SYSTEM, "BLE Scan: Bluetooth is disabled on device", "")
+            return
+        }
+
+        try {
+            // First collect bonded/paired Bluetooth devices
+            val bonded = try {
+                adapter.bondedDevices?.map { dev ->
+                    val devName = try { dev.name ?: dev.address } catch (e: SecurityException) { dev.address }
+                    BleMidiDevice(
+                        device = dev,
+                        name = devName,
+                        address = dev.address,
+                        rssi = -50,
+                        isBonded = true,
+                        isConnected = _openedBleMidiDevices.containsKey(dev.address)
+                    )
+                } ?: emptyList()
+            } catch (e: SecurityException) {
+                emptyList()
+            }
+
+            _scannedBleDevices.value = bonded
+            _isScanningBle.value = true
+            logTraffic(MidiTrafficLog.Direction.SYSTEM, "Starting BLE MIDI Scan...", "")
+
+            val scanner = adapter.bluetoothLeScanner
+            if (scanner != null) {
+                val filter = ScanFilter.Builder()
+                    .setServiceUuid(ParcelUuid(BLE_MIDI_SERVICE_UUID))
+                    .build()
+                val settings = ScanSettings.Builder()
+                    .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+                    .build()
+
+                try {
+                    scanner.startScan(listOf(filter), settings, bleScanCallback)
+                } catch (e: Exception) {
+                    scanner.startScan(bleScanCallback)
+                }
+
+                // Auto stop scan after 12 seconds to save battery
+                Handler(Looper.getMainLooper()).postDelayed({
+                    stopBleScan()
+                }, 12000)
+            } else {
+                _isScanningBle.value = false
+                logTraffic(MidiTrafficLog.Direction.SYSTEM, "BLE Scanner is unavailable", "")
+            }
+        } catch (e: SecurityException) {
+            Log.e("KorgMidiService", "SecurityException during BLE scan", e)
+            _isScanningBle.value = false
+            logTraffic(MidiTrafficLog.Direction.SYSTEM, "BLE Scan permission required", e.message ?: "")
+        } catch (e: Exception) {
+            Log.e("KorgMidiService", "Error starting BLE scan", e)
+            _isScanningBle.value = false
+        }
+    }
+
+    fun stopBleScan() {
+        if (!_isScanningBle.value) return
+        try {
+            bluetoothAdapter?.bluetoothLeScanner?.stopScan(bleScanCallback)
+        } catch (e: Exception) {
+            // Ignore
+        }
+        _isScanningBle.value = false
+        logTraffic(MidiTrafficLog.Direction.SYSTEM, "BLE MIDI Scan Stopped", "")
+    }
+
+    fun connectBleDevice(bluetoothDevice: BluetoothDevice, asInput: Boolean = true, asOutput: Boolean = true) {
+        val devName = try { bluetoothDevice.name ?: bluetoothDevice.address } catch (e: SecurityException) { bluetoothDevice.address }
+        _statusMessage.value = "Connecting to BLE MIDI: $devName..."
+        logTraffic(MidiTrafficLog.Direction.SYSTEM, "Opening BLE MIDI Device: $devName", bluetoothDevice.address)
+
+        try {
+            midiManager.openBluetoothDevice(bluetoothDevice, { midiDevice ->
+                if (midiDevice != null) {
+                    _openedBleMidiDevices[bluetoothDevice.address] = midiDevice
+                    logTraffic(
+                        MidiTrafficLog.Direction.SYSTEM,
+                        "BLE MIDI Connected: $devName",
+                        "Ports: IN=${midiDevice.info.inputPortCount}, OUT=${midiDevice.info.outputPortCount}"
+                    )
+                    refreshDevices()
+
+                    if (asInput && midiDevice.info.outputPortCount > 0) {
+                        connectInputDevice(midiDevice.info)
+                    }
+                    if (asOutput && midiDevice.info.inputPortCount > 0) {
+                        connectOutputDevice(midiDevice.info)
+                    }
+
+                    _scannedBleDevices.value = _scannedBleDevices.value.map {
+                        if (it.address == bluetoothDevice.address) it.copy(isConnected = true) else it
+                    }
+                    _statusMessage.value = "Connected to BLE: $devName"
+                } else {
+                    _statusMessage.value = "Failed to connect BLE MIDI: $devName"
+                    logTraffic(MidiTrafficLog.Direction.SYSTEM, "Failed to open BLE MIDI: $devName", "")
+                }
+            }, Handler(Looper.getMainLooper()))
+        } catch (e: Exception) {
+            Log.e("KorgMidiService", "Error opening BLE MIDI device", e)
+            _statusMessage.value = "BLE Connection Error: ${e.localizedMessage}"
+            logTraffic(MidiTrafficLog.Direction.SYSTEM, "BLE Connection Error", e.localizedMessage ?: "")
+        }
+    }
+
+    fun disconnectBleDevice(bluetoothDevice: BluetoothDevice) {
+        val midiDevice = _openedBleMidiDevices.remove(bluetoothDevice.address)
+        if (midiDevice != null) {
+            if (_selectedInputDeviceInfo.value?.id == midiDevice.info.id) {
+                connectInputDevice(null)
+            }
+            if (_selectedOutputDeviceInfo.value?.id == midiDevice.info.id) {
+                connectOutputDevice(null)
+            }
+            try {
+                midiDevice.close()
+            } catch (e: Exception) {
+                Log.e("KorgMidiService", "Error closing BLE MIDI device", e)
+            }
+        }
+        _scannedBleDevices.value = _scannedBleDevices.value.map {
+            if (it.address == bluetoothDevice.address) it.copy(isConnected = false) else it
+        }
+        refreshDevices()
     }
 
     fun connectInputDevice(deviceInfo: MidiDeviceInfo?) {
@@ -726,6 +932,11 @@ class KorgMidiService : Service() {
 
     override fun onDestroy() {
         super.onDestroy()
+        stopBleScan()
+        _openedBleMidiDevices.values.forEach {
+            try { it.close() } catch (e: Exception) {}
+        }
+        _openedBleMidiDevices.clear()
         disconnectDevice("Service destroyed")
         try {
             midiManager.unregisterDeviceCallback(deviceCallback)

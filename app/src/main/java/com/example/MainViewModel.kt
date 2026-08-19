@@ -34,6 +34,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     val midiController = KorgMidiController(midiManager, application)
     val selectedInputDevice: StateFlow<MidiDeviceInfo?> = midiController.selectedInputDevice
     val selectedOutputDevice: StateFlow<MidiDeviceInfo?> = midiController.selectedOutputDevice
+    val scannedBleDevices: StateFlow<List<BleMidiDevice>> = midiController.scannedBleDevices
+    val isScanningBle: StateFlow<Boolean> = midiController.isScanningBle
+
+    fun startBleScan() {
+        midiController.startBleScan()
+    }
+
+    fun stopBleScan() {
+        midiController.stopBleScan()
+    }
+
+    fun connectBleDevice(device: android.bluetooth.BluetoothDevice, asInput: Boolean = true, asOutput: Boolean = true) {
+        midiController.connectBleDevice(device, asInput, asOutput)
+    }
+
+    fun disconnectBleDevice(device: android.bluetooth.BluetoothDevice) {
+        midiController.disconnectBleDevice(device)
+    }
 
     private val prefs: SharedPreferences = application.getSharedPreferences("korg_midi_prefs", Context.MODE_PRIVATE)
 

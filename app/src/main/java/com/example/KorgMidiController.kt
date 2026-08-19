@@ -1,5 +1,6 @@
 package com.example
 
+import android.bluetooth.BluetoothDevice
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
@@ -52,6 +53,12 @@ class KorgMidiController(
     private val _incomingMidiEvent = MutableStateFlow<IncomingMidiInputEvent?>(null)
     val incomingMidiEvent: StateFlow<IncomingMidiInputEvent?> = _incomingMidiEvent.asStateFlow()
 
+    private val _scannedBleDevices = MutableStateFlow<List<BleMidiDevice>>(emptyList())
+    val scannedBleDevices: StateFlow<List<BleMidiDevice>> = _scannedBleDevices.asStateFlow()
+
+    private val _isScanningBle = MutableStateFlow(false)
+    val isScanningBle: StateFlow<Boolean> = _isScanningBle.asStateFlow()
+
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
             val korgBinder = binder as? KorgMidiService.KorgMidiBinder
@@ -87,6 +94,12 @@ class KorgMidiController(
                 scope.launch {
                     midiService?.incomingMidiEvent?.collect { _incomingMidiEvent.value = it }
                 }
+                scope.launch {
+                    midiService?.scannedBleDevices?.collect { _scannedBleDevices.value = it }
+                }
+                scope.launch {
+                    midiService?.isScanningBle?.collect { _isScanningBle.value = it }
+                }
             }
         }
 
@@ -109,6 +122,22 @@ class KorgMidiController(
                 Log.e("KorgMidiController", "Failed to bind KorgMidiService", e)
             }
         }
+    }
+
+    fun startBleScan() {
+        midiService?.startBleScan()
+    }
+
+    fun stopBleScan() {
+        midiService?.stopBleScan()
+    }
+
+    fun connectBleDevice(device: BluetoothDevice, asInput: Boolean = true, asOutput: Boolean = true) {
+        midiService?.connectBleDevice(device, asInput, asOutput)
+    }
+
+    fun disconnectBleDevice(device: BluetoothDevice) {
+        midiService?.disconnectBleDevice(device)
     }
 
     fun selectInputDevice(deviceInfo: MidiDeviceInfo?) {
