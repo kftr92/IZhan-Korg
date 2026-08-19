@@ -1,0 +1,8 @@
+{
+  "name": "Izhan Korg",
+  "description": "A MIDI controller for Korg synthesizers with transpose and sound selection.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
